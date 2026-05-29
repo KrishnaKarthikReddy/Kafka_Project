@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>ISS Mission Control (3D)</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1"></script>
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+<style>
+body {
+    font-family: 'Inter', sans-serif;
+    background: #0f172a;
+    color: #f8fafc;
+    margin: 0;
+    padding: 20px;
+}
+
+/* ---- STATS CARDS ---- */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 15px;
+    max-width: 1400px;
+    margin: 0 auto 20px;
+}
+
+.card {
+    background: #1e293b;
+    padding: 15px;
+    border-radius: 12px;
+    border: 1px solid #334155;
+    text-align: center;
+}
+
+.val {
+    font-size: 1rem;
+    font-weight: bold;
+    color: #38bdf8;
+}
+
+/* ---- MAP ---- */
+#map {
+    height: 400px;
+    max-width: 1400px;
+    margin: 0 auto 20px;
+    border-radius: 15px;
+    border: 2px solid #334155;
+}
+
+/* ---- GRAPH GRID ---- */
+.graphs-container {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 20px;
+    max-width: 1400px;
+    margin: auto;
+}
+
+/* ---- GRAPH BOX ---- */
+.graph-box {
+    background: white;
+    border-radius: 15px;
+    border: 2px solid #334155;
+    padding: 15px;
+    height: 350px;
+    display: flex;
+    flex-direction: column;
+}
+
+.graph-label {
+    color: black;
+    text-align: center;
+    font-weight: bold;
+    margin-bottom: 10px;
+}
+
+canvas {
+    flex-grow: 1;
+}
+
+#graph3d {
+    height: 500px;
+}
+</style>
+</head>
+
+<body>
+
+<!-- -------- STATS -------- -->
+<div class="stats-grid">
+
+    <div class="card">
+        <strong>Distance</strong>
+        <div id="distance" class="val">--</div>
+    </div>
+
+    <div class="card">
+        <strong>Velocity</strong>
+        <div id="speed" class="val">--</div>
+    </div>
+
+    <div class="card">
+        <strong>Altitude</strong>
+        <div id="altitude" class="val">--</div>
+    </div>
+
+    <div class="card">
+        <strong>ISS Coordinates</strong>
+        <div id="issCoords" class="val">--</div>
+    </div>
+
+    <div class="card">
+        <strong>Laptop Coordinates</strong>
+        <div id="userCoords" class="val">--</div>
+    </div>
+
+</div>
+
+<!-- -------- MAP -------- -->
+<div id="map"></div>
+
+<!-- -------- GRAPHS -------- -->
+<div class="graphs-container">
+
+    <div class="graph-box">
+        <div class="graph-label">3D ISS Trajectory</div>
+        <div id="graph3d"></div>
+    </div>
+
+    <div class="graph-box">
+        <div class="graph-label">XY Projection (Top View: Longitude vs Latitude)</div>
+        <canvas id="xyChart"></canvas>
+    </div>
+
+    <div class="graph-box">
+        <div class="graph-label">YZ Projection (Side View: Latitude vs Altitude)</div>
+        <canvas id="yzChart"></canvas>
+    </div>
+
+    <div class="graph-box">
+        <div class="graph-label">XZ Projection (Front View: Longitude vs Altitude)  </div>
+        <canvas id="xzChart"></canvas>
+    </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+// -------- MAP --------
+const map = L.map('map').setView([10, 0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+const issMarker = L.marker([0,0]).addTo(map);
+const userMarker = L.circleMarker([0,0], {color:'orange'}).addTo(map);
+
+// -------- VARIABLES --------
+let userLat = null, userLon = null, user3D=null;
+let issTrajectory3D = [];
+
+// -------- CARTESIAN --------
+function toCartesian(lat, lon, alt){
+    const R = 6371 + alt;
+    const latRad = lat * Math.PI/180;
+    const lonRad = lon * Math.PI/180;
+
+    return {
+        x: R*Math.cos(latRad)*Math.cos(lonRad),
+        y: R*Math.cos(latRad)*Math.sin(lonRad),
+        z: R*Math.sin(latRad)
+    };
+}
+
+// -------- CHART CONFIG --------
+function createChart(id,xLabel,yLabel){
+    return new Chart(document.getElementById(id),{
+        type:'scatter',
+        data:{
+            datasets:[
+                {label:'ISS',data:[],borderColor:'black',showLine:true},
+                {label:'User',data:[],backgroundColor:'orange',pointRadius:6}
+            ]
+        },
+        options:{
+            maintainAspectRatio:false,
+            plugins:{
+                zoom:{
+                    pan:{enabled:true,mode:'xy'},
+                    zoom:{wheel:{enabled:true},pinch:{enabled:true},mode:'xy'}
+                }
+            },
+            scales:{
+                x:{title:{display:true,text:xLabel}},
+                y:{title:{display:true,text:yLabel}}
+            }
+        }
+    });
+}
+
+const xyChart = createChart(
+    'xyChart',
+    'Horizontal Axis: X (Longitude-based Cartesian, km)',
+    'Vertical Axis: Y (Latitude-based Cartesian, km)'
+);
+
+const yzChart = createChart(
+    'yzChart',
+    'Horizontal Axis: Y (Latitude-based Cartesian, km)',
+    'Vertical Axis: Z (Altitude / Polar Height, km)'
+);
+
+const xzChart = createChart(
+    'xzChart',
+    'Horizontal Axis: X (Longitude-based Cartesian, km)',
+    'Vertical Axis: Z (Altitude / Polar Height, km)'
+);
+
+// -------- 3D GRAPH --------
+function update3DGraph(point){
+
+    issTrajectory3D.push(point);
+
+    Plotly.react('graph3d',[
+        {
+            x: issTrajectory3D.map(p=>p.x),
+            y: issTrajectory3D.map(p=>p.y),
+            z: issTrajectory3D.map(p=>p.z),
+            mode:'lines',
+            type:'scatter3d',
+            name:'ISS'
+        },
+        user3D ? {
+            x:[user3D.x],
+            y:[user3D.y],
+            z:[user3D.z],
+            mode:'markers',
+            type:'scatter3d',
+            name:'User'
+        }:null
+    ].filter(Boolean),
+    {
+        scene:{aspectmode:'cube'},
+        margin:{l:0,r:0,b:0,t:0}
+    },
+    {scrollZoom:true});
+}
+
+// -------- GPS --------
+navigator.geolocation.watchPosition(pos=>{
+    userLat = pos.coords.latitude;
+    userLon = pos.coords.longitude;
+
+    userMarker.setLatLng([userLat, userLon]);
+    user3D = toCartesian(userLat, userLon, 0);
+
+    document.getElementById('userCoords').innerText =
+        `${userLat.toFixed(4)}, ${userLon.toFixed(4)}`;
+});
+
+// -------- WEBSOCKET --------
+const socket=new WebSocket('ws://127.0.0.1:8765');
+
+socket.onmessage=function(event){
+
+    const d=JSON.parse(event.data);
+
+    const lat=d.latitude;
+    const lon=d.longitude;
+    const alt=d.altitude;
+    const vel=d.velocity;
+
+    document.getElementById('speed').innerText =
+        `${vel.toFixed(2)} km/h`;
+
+    document.getElementById('altitude').innerText =
+        `${alt.toFixed(2)} km`;
+
+    document.getElementById('issCoords').innerText =
+        `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+
+    issMarker.setLatLng([lat,lon]);
+
+    document.getElementById('altitude').innerText=alt.toFixed(2)+' km';
+    document.getElementById('speed').innerText=vel.toFixed(0)+' km/h';
+
+    const iss3D=toCartesian(lat,lon,alt);
+
+    update3DGraph(iss3D);
+
+    if(user3D){
+        const dist=Math.sqrt(
+            (iss3D.x-user3D.x)**2+
+            (iss3D.y-user3D.y)**2+
+            (iss3D.z-user3D.z)**2
+        );
+
+        document.getElementById('distance').innerText=dist.toFixed(2)+' km';
+
+        xyChart.data.datasets[0].data.push({x:iss3D.x,y:iss3D.y});
+        xyChart.data.datasets[1].data=[{x:user3D.x,y:user3D.y}];
+
+        yzChart.data.datasets[0].data.push({x:iss3D.y,y:iss3D.z});
+        yzChart.data.datasets[1].data=[{x:user3D.y,y:user3D.z}];
+
+        xzChart.data.datasets[0].data.push({x:iss3D.x,y:iss3D.z});
+        xzChart.data.datasets[1].data=[{x:user3D.x,y:user3D.z}];
+
+        xyChart.update('none');
+        yzChart.update('none');
+        xzChart.update('none');
+    }
+};
+
+</script>
+</body>
+</html>
